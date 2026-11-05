@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Steampunk Gear Wars - TikTok Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+       overflow: hidden;
+       height: 100dvh; 
+       width: 100vw;
+       margin: 0;
+       padding: 0;
+       display: flex;
+       justify-content: center;
+       align-items: center;
+       background: #050508;
+       color: white;
+       font-family: Arial, sans-serif;
+    }
+    .game-frame {
+      position: relative;
+      width: min(100vw, calc(100vh * 9 / 16));
+      height: 100vh;
+      background: radial-gradient(circle, rgba(26, 26, 38, 0.85) 0%, rgba(5, 5, 8, 0.95) 100%);
+      overflow: hidden;
+    }
+    #canvasZone { width: 100%; height: 100%; display: block; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+  <div class="game-frame">
+    <canvas id="canvasZone"></canvas>
+  </div>
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const ROOM = urlParams.get('room') || '';
+    const socket = io(window.location.origin, {
+      query: { room: ROOM },
+      transports: ['websocket', 'polling'],
+      reconnection: true
+    });
+    const canvas = document.getElementById('canvasZone');
+    const ctx = canvas.getContext('2d');
+    canvas.width = canvas.parentElement.clientWidth;
+    canvas.height = canvas.parentElement.clientHeight;
+  </script>
+</body>
+</html>
