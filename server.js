@@ -36,7 +36,9 @@ if (!admin.apps.length) {
   }
 }
 
-const db = admin.firestore();
+const db = admin.firestore({
+  databaseId: 'ai-studio-android-tiktokli-c9be166c-0106-416a-aa2b-cd8e15472c06'
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
