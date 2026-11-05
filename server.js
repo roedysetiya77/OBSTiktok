@@ -4,6 +4,7 @@ import express from 'express';
 import session from 'express-session';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import { WebSocketServer } from 'ws';
 import pkg from 'tiktok-live-connector';
 const { TikTokLiveConnection, SignConfig } = pkg;
 import { fileURLToPath } from 'url';
@@ -888,7 +889,18 @@ function connectToTikTok(session) {
     };
   };
 
-  const emitToRoom = (event, data) => { io.to(session.username).emit(event, data); io.to('__default__').emit(event, data); };
+  const emitToRoom = (event, data) => { 
+    io.to(session.username).emit(event, data); 
+    io.to('__default__').emit(event, data); 
+    try {
+      const msg = JSON.stringify({ event, username: data.uniqueId || data.username || session.username, ...data });
+      wss.clients.forEach(client => {
+        if (client.readyState === 1) {
+          client.send(msg);
+        }
+      });
+    } catch(e) {}
+  };
 
   connection.on('member', (data) => {
     const user = extractUser(data);
@@ -1056,6 +1068,78 @@ io.on('connection', (socket) => {
       sess.demoInterval = null;
       io.to(targetRoom).emit('demo-status', { active: false });
     }
+  });
+});
+
+const wss = new WebSocketServer({ noServer: true });
+
+server.on('upgrade', (request, socket, head) => {
+  if (request.url.startsWith('/socket.io/')) {
+    return;
+  }
+  wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.emit('connection', ws, request);
+  });
+});
+
+wss.on('connection', (ws, req) => {
+  console.log('🟢 Android / Raw WebSocket client connected');
+  let currentRoom = 'stringartstudioo';
+  
+  ws.send(JSON.stringify({
+    event: 'status',
+    comment: `Terhubung ke TikTok Relay Server (@${currentRoom})`,
+    isLive: true
+  }));
+
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message.toString());
+      console.log('📩 Raw WS Action:', data);
+      const action = data.action;
+      const username = data.username || data.user || currentRoom;
+      
+      if (action === 'SET_USER' || action === 'CONNECT') {
+        currentRoom = username.replace('@', '').trim();
+        let sess = sessions.get(currentRoom);
+        if (!sess) {
+          sess = new StreamSession(currentRoom, '', 'Host');
+          sessions.set(currentRoom, sess);
+        }
+        if (sess.connection) try { sess.connection.disconnect(); } catch(e) {}
+        connectToTikTok(sess);
+        ws.send(JSON.stringify({
+          event: 'status',
+          comment: `Terhubung ke TikTok Relay (@${currentRoom})`,
+          isLive: true
+        }));
+      } else if (action === 'TEST_EVENT') {
+        ws.send(JSON.stringify({
+          event: 'chat',
+          username: 'TestViewer',
+          comment: 'Halo min, selamat live streaming! 🔥'
+        }));
+      } else if (action === 'TOGGLE_DEMO') {
+        const targetRoom = data.room || currentRoom;
+        let sess = sessions.get(targetRoom);
+        if (!sess) {
+          sess = new StreamSession(targetRoom, '', 'Demo Host');
+          sessions.set(targetRoom, sess);
+        }
+        sess.demoActive = !sess.demoActive;
+        ws.send(JSON.stringify({
+          event: 'status',
+          comment: `Demo Mode ${sess.demoActive ? 'AKTIF' : 'MATI'} untuk @${targetRoom}`,
+          isLive: true
+        }));
+      }
+    } catch (e) {
+      console.error('Raw WS message error:', e);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('🔴 Android / Raw WebSocket client disconnected');
   });
 });
 
