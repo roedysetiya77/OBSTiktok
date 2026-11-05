@@ -1,474 +1,1036 @@
-/**
- * TIKTOK LIVE RELAY SERVER FOR RENDER.COM & LAPTOP LOKAL (v2.0)
- * Menghubungkan siaran langsung TikTok ke aplikasi Android TikTok Stream Overlay.
- * Dilengkapi dengan API Proxy Image untuk mengatasi CORS/403 profile picture.
- */
+try { await import('dotenv/config'); } catch(e) {}
 
-const http = require('http');
-const url = require('url');
-const os = require('os');
-const WebSocket = require('ws');
-const fetch = require('node-fetch');
+import express from 'express';
+import session from 'express-session';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import { TikTokLiveConnection, SignConfig } from 'tiktok-live-connector';
+import { fileURLToPath } from 'url';
 
-// Coba memuat library tiktok-live-connector
-let LiveConnectionClass = null;
-try {
-    const tklib = require('tiktok-live-connector');
-    LiveConnectionClass = tklib.WebcastPushConnection || tklib.TikTokLiveConnection || tklib;
-} catch (e) {
-    console.error('⚠️ PERINGATAN: Library tiktok-live-connector belum terpasang.');
-    console.error('👉 Jalankan di terminal: npm install');
+import path from 'path';
+import fs from 'fs';
+
+import axios from 'axios';
+import fetch from 'node-fetch';
+import { exec } from 'child_process';
+
+import { db } from "./firebase.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const server = createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+const PORT = 3000;
+const USERNAME = process.env.TIKTOK_USERNAME || 'ceoindonesianghost';
+
+// ===== AI Voice Avatar =====
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || '';
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || 'yXG8bh6LkPVmQb2P2UdE'; // Neo Todak - cloned voice
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+app.use('/audio', express.static('audio'));
+
+
+// UNTUK LOGIN SESSION ADMIN PANEL
+
+app.use(session({
+  secret: 'host-panel-secret',
+  resave: false,
+  saveUninitialized: false, // 🔥 penting
+  cookie: {
+    httpOnly: true
+  }
+}));
+
+// ======================================================
+// BUAT FOLDER AUDIO JIKA BELUM ADA
+// ======================================================
+
+const audioDir = path.join(__dirname, 'audio');
+
+if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir);
 }
 
-// Render.com menyediakan port secara dinamis melalui process.env.PORT
-const PORT = process.env.PORT || 3000;
-let currentTikTokUser = process.env.TIKTOK_USER || "stringartstudioo";
-let currentSessionId = process.env.TIKTOK_SESSION_ID || "";
-let tiktokLive = null;
-let standbyTimer = null;
-let isLiveActive = false;
+// ======================================================
+// FUNCTION TTS
+// ======================================================
 
-// Cari IP Local Wi-Fi Laptop (Untuk Penggunaan Lokal)
-function getLocalIpAddress() {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name]) {
-            if (iface.family === 'IPv4' && !iface.internal) {
-                return iface.address;
-            }
-        }
-    }
-    return '127.0.0.1';
-}
+function speakText(text) {
 
-const localIp = getLocalIpAddress();
+    return new Promise((resolve, reject) => {
 
-// 1. Buat HTTP Server & Web Dashboard
-const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        // ==================================================
+        // VALIDASI
+        // ==================================================
 
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-    }
-
-    const reqUrl = req.url || '/';
-
-    // --- API PROXY IMAGE (Menghindari CORS / 403 saat load Foto Profil TikTok) ---
-    if (reqUrl.startsWith('/api/proxy-image')) {
-        const parsed = url.parse(reqUrl, true);
-        const imageUrl = parsed.query.url;
-
-        if (!imageUrl || imageUrl === 'undefined' || imageUrl === 'true') {
-            res.writeHead(400, { 'Content-Type': 'text/plain' });
-            res.end("URL gambar tidak valid");
+        if (!text) {
+            reject("Text kosong");
             return;
         }
 
-        try {
-            const response = await fetch(imageUrl, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            });
+        // Bersihkan text
+        text = String(text)
+            .replace(/"/g, '')
+            .replace(/\n/g, ' ')
+            .trim();
 
-            if (!response.ok) throw new Error('Gagal mengambil gambar dari sumber TikTok');
-
-            const buffer = await response.buffer();
-
-            res.writeHead(200, {
-                'Access-Control-Allow-Origin': '*',
-                'Cross-Origin-Resource-Policy': 'cross-origin',
-                'Content-Type': response.headers.get('content-type') || 'image/jpeg',
-                'Cache-Control': 'public, max-age=86400'
-            });
-            res.end(buffer);
-        } catch (error) {
-            console.error("Proxy Image Error:", error.message);
-            res.writeHead(500, { 'Content-Type': 'text/plain' });
-            res.end("Gagal memproses gambar");
-        }
-        return;
-    }
-
-    // Endpoint API untuk Mengubah Target Username & SessionId
-    if (reqUrl.startsWith('/set-config')) {
-        const parsed = url.parse(reqUrl, true);
-        const newUser = parsed.query.user;
-        const newSessionId = parsed.query.sessionid;
-
-        if (newSessionId !== undefined) {
-            currentSessionId = (newSessionId || '').trim();
-            console.log(`[CONFIG] Session ID diperbarui.`);
-        }
-
-        if (newUser && newUser.trim().length > 0) {
-            const cleanUser = newUser.trim().replace('@', '');
-            console.log(`[DASHBOARD] Mengganti target TikTok ke: @${cleanUser}`);
-            connectTikTok(cleanUser);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                status: "OK",
-                target: cleanUser,
-                hasSessionId: !!currentSessionId
-            }));
+        if (text === '') {
+            reject("Text kosong");
             return;
         }
-    }
 
-    // Endpoint API Status Server
-    if (reqUrl.startsWith('/status')) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: isLiveActive ? "LIVE_ACTIVE" : "STANDBY",
-            targetUser: currentTikTokUser,
-            hasSessionId: !!currentSessionId,
-            clientsConnected: wss.clients.size,
-            port: PORT
-        }));
-        return;
-    }
+        // ==================================================
+        // FILE AUDIO
+        // ==================================================
 
-    // Endpoint API untuk Tes Komentar & Gift
-    if (reqUrl.startsWith('/test')) {
-        sendTestEvents();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: "TEST_SENT", message: "Tes chat dan gift dikirim ke HP!" }));
-        return;
-    }
+        const fileName =
+            `tts_${Date.now()}.mp3`;
 
-    // Halaman Dashboard Web Server
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`
-    <!DOCTYPE html>
-    <html lang="id">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>TikTok Live OBS Relay Server (Render & Local)</title>
-        <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; text-align: center; }
-            .card { background: #1e293b; max-width: 620px; margin: 0 auto; padding: 28px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: left; }
-            h1 { color: #38bdf8; margin-top: 0; text-align: center; font-size: 22px; }
-            .badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-weight: bold; font-size: 13px; }
-            .badge-live { background: #10b981; color: #fff; }
-            .badge-standby { background: #f59e0b; color: #000; }
-            .btn { background: #2563eb; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 10px; width: 100%; font-size: 15px; }
-            .btn-test { background: #059669; margin-top: 8px; }
-            input[type="text"] { width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: white; margin-top: 6px; font-size: 15px; }
-            .info-box { background: #0f172a; padding: 14px; border-radius: 8px; border-left: 4px solid #38bdf8; margin: 16px 0; font-family: monospace; font-size: 13px; line-height: 1.6; }
-            label { font-size: 13px; color: #94a3b8; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>🚀 TikTok Live OBS Relay Server</h1>
-            <p style="text-align: center;">
-                Status: <span class="badge ${isLiveActive ? 'badge-live' : 'badge-standby'}">${isLiveActive ? '🟢 LIVE AKTIF' : '🟡 STANDBY MENUNGGU LIVE'}</span>
-            </p>
-            
-            <div class="info-box">
-                <b>URL WebSocket HP Android:</b><br>
-                - Render Cloud : <b>wss://${req.headers.host || 'nama-app-anda.onrender.com'}</b><br>
-                - Laptop Wi-Fi  : <b>ws://${localIp}:${PORT}</b><br><br>
-                Target Saat Ini : <b>@${currentTikTokUser}</b><br>
-                Session ID      : <b>${currentSessionId ? 'Terpasang (Bypass 403 Aktif)' : 'Belum Dipasang'}</b>
-            </div>
+        const outputPath =
+            path.join(audioDir, fileName);
 
-            <form action="/set-config" method="GET">
-                <label>GANTI AKUN TIKTOK TARGET:</label>
-                <input type="text" name="user" value="${currentTikTokUser}" placeholder="Contoh: stringartstudioo" required />
-                
-                <div style="margin-top: 14px;">
-                    <label>COOKIE SESSIONID TIKTOK (Solusi jika Kena 403 / Bot):</label>
-                    <input type="text" name="sessionid" value="${currentSessionId}" placeholder="Tempel sessionid dari browser di sini..." />
-                </div>
+        // ==================================================
+        // COMMAND EDGE-TTS
+        // ==================================================
 
-                <button type="submit" class="btn">Update Pengaturan & Sambungkan</button>
-            </form>
+        const command =
+            `edge-tts --voice id-ID-GadisNeural --text "${text}" --write-media "${outputPath}"`;
 
-            <button onclick="fetch('/test').then(() => alert('Event tes berhasil dikirim ke HP Android!'))" class="btn btn-test">
-                🧪 Kirim Tes Komentar & Gift ke HP Android
-            </button>
-        </div>
-    </body>
-    </html>
-    `);
-});
+        // ==================================================
+        // EXECUTE
+        // ==================================================
 
-// 2. Buat WebSocket Server untuk HP Android
-const wss = new WebSocket.Server({ server });
-const clients = new Set();
+        exec(command, async (error) => {
 
-wss.on('connection', ws => {
-    clients.add(ws);
-    console.log(`📱 [HP ANDROID TERHUBUNG] Client baru (${clients.size} HP tersambung)`);
+            if (error) {
 
-    ws.send(JSON.stringify({
-        event: 'status',
-        comment: isLiveActive
-            ? `🟢 Terhubung ke relay server! Live @${currentTikTokUser} sedang aktif.`
-            : `🟡 Terhubung ke relay server. Menunggu @${currentTikTokUser} mulai Live...`
-    }));
+                console.warn(
+                    'edge-tts CLI failed or not found, falling back to Google Translate TTS...',
+                    error
+                );
 
-    ws.on('message', message => {
-        try {
-            const data = JSON.parse(message);
-            if (data.action === 'SET_USER' && data.username) {
-                const newUser = data.username.replace('@', '').trim();
-                if (newUser && newUser !== currentTikTokUser) {
-                    console.log(`📱 [HP MINTA GANTI AKUN] Target diubah menjadi: @${newUser}`);
-                    connectTikTok(newUser);
+                try {
+                    const fallbackUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=id&client=tw-ob&q=${encodeURIComponent(text)}`;
+                    const res = await fetch(fallbackUrl, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                    });
+                    if (!res.ok) {
+                        throw new Error(`Google TTS returned status ${res.status}`);
+                    }
+                    const buffer = await res.arrayBuffer();
+                    await fs.promises.writeFile(outputPath, Buffer.from(buffer));
+                    
+                    console.log('TTS Saved (via Google Fallback):', outputPath);
+                    resolve(`/audio/${fileName}`);
+                    
+                    // Auto delete after 30 seconds
+                    setTimeout(() => {
+                        fs.unlink(outputPath, (err) => {
+                            if (err) console.log('Gagal hapus:', fileName);
+                        });
+                    }, 30000);
+                } catch (fallbackErr) {
+                    console.error('TTS Fallback Error:', fallbackErr);
+                    reject(error);
                 }
-            } else if (data.action === 'TEST_EVENT') {
-                sendTestEvents();
+                return;
             }
-        } catch (e) {}
-    });
 
-    ws.on('close', () => {
-        clients.delete(ws);
-        console.log(`📱 [HP TERPUTUS] Sisa client: ${clients.size}`);
-    });
-});
+            console.log(
+                'TTS Saved:',
+                outputPath
+            );
 
-function broadcast(obj) {
-    const payload = JSON.stringify(obj);
-    for (const client of clients) {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(payload);
-        }
-    }
-}
+            // ==================================================
+            // RETURN URL AUDIO
+            // ==================================================
 
-function sendTestEvents() {
-    console.log('🧪 [TES] Mengirim event simulasi chat & gift ke HP...');
-    broadcast({
-        event: 'chat',
-        username: 'penonton_setia',
-        comment: 'Halo bang! Overlay TikTok Live-nya keren banget!',
-        badge: 'VIP'
-    });
-    setTimeout(() => {
-        broadcast({
-            event: 'gift',
-            username: 'sultan_tiktok',
-            giftName: 'TikTok Universe',
-            giftCount: 1,
-            diamondCount: 5000
+            resolve(`/audio/${fileName}`);
+
+            // ==================================================
+            // AUTO DELETE FILE
+            // ==================================================
+
+            setTimeout(() => {
+
+                fs.unlink(outputPath, (err) => {
+
+                    if (err) {
+                        console.log(
+                            'Gagal hapus:',
+                            fileName
+                        );
+                    }
+
+                });
+
+            }, 30000);
+
         });
-    }, 1000);
-}
 
-// Helper ekstraksi aman data TikTok
-function extractUserInfo(data) {
-    if (!data) return { username: 'Penonton', nickname: 'Penonton' };
-    const src = data.chatMessage || data.data || data;
-    const userObj = src.user || src.author || src.sender || src;
-
-    const uniqueId = userObj.uniqueId || userObj.displayId || src.uniqueId || data.uniqueId;
-    const nickname = userObj.nickname || src.nickname || data.nickname || uniqueId;
-
-    return {
-        username: uniqueId || nickname || 'Penonton',
-        nickname: nickname || uniqueId || 'Penonton'
-    };
-}
-
-function extractCommentText(data) {
-    if (!data) return '';
-    if (typeof data === 'string') return data;
-    const src = data.chatMessage || data.data || data;
-
-    const comment = src.comment || src.content || src.text || src.message || src.commentText ||
-                    data.comment || data.content || data.text || data.message;
-    if (typeof comment === 'string' && comment.length > 0) return comment;
-
-    for (const key of ['comment', 'content', 'text', 'message', 'msg']) {
-        if (src[key] && typeof src[key] === 'string') return src[key];
-        if (data[key] && typeof data[key] === 'string') return data[key];
-    }
-    return '';
-}
-
-function extractGiftInfo(data) {
-    if (!data) return { giftName: 'Gift', count: 1, diamondCount: 1 };
-    const src = data.giftMessage || data.data || data;
-    const giftObj = src.gift || src.giftDetails || src;
-
-    const giftName = giftObj.giftName || giftObj.name || src.giftName || data.giftName || 'Gift';
-    const count = src.repeatCount || src.count || src.giftCount || giftObj.repeatCount || data.repeatCount || 1;
-    const diamonds = src.diamondCount || src.diamonds || giftObj.diamondCount || (count * 1);
-
-    return { giftName, count, diamondCount: diamonds };
-}
-
-// Logika Koneksi TikTok Live dengan Mode STANDBY (Auto Retry)
-function connectTikTok(username) {
-    if (!username) return;
-    currentTikTokUser = username.replace('@', '').trim();
-
-    if (standbyTimer) {
-        clearTimeout(standbyTimer);
-        standbyTimer = null;
-    }
-
-    if (tiktokLive) {
-        try { tiktokLive.disconnect(); } catch (e) {}
-        tiktokLive = null;
-    }
-
-    if (!LiveConnectionClass) {
-        console.error('❌ Library tiktok-live-connector belum terinstall dengan benar.');
-        return;
-    }
-
-    console.log(`[TARGET] Menghubungkan ke TikTok: @${currentTikTokUser}...`);
-    broadcast({
-        event: 'status',
-        comment: `Menghubungkan ke @${currentTikTokUser}...`
     });
+
+}
+
+
+
+
+
+// ======================================================
+// API TTS
+// ======================================================
+
+app.use(express.json());
+
+app.post('/tts', async (req, res) => {
 
     try {
-        const connectionOptions = {
-            processInitialData: false,
-            enableExtendedGiftInfo: false,
-            enableWebsocketUpgrade: true,
-            requestPollingIntervalMs: 2000,
-            clientParams: {
-                app_language: 'id-ID'
-            }
-        };
 
-        if (currentSessionId && currentSessionId.trim().length > 0) {
-            connectionOptions.sessionId = currentSessionId.trim();
+        const text = req.body.text;
+
+        if (!text) {
+            return res.status(400).json({
+                success: false,
+                error: 'Text kosong'
+            });
         }
 
-        tiktokLive = new LiveConnectionClass(currentTikTokUser, connectionOptions);
+        const audioUrl = await speakText(text);
 
-        tiktokLive.on('chat', data => {
-            const userInfo = extractUserInfo(data);
-            const comment = extractCommentText(data);
-            const isMod = !!(data.isModerator || (data.user && data.user.isModerator) || (data.chatMessage && data.chatMessage.isModerator));
-            const isSub = !!(data.isSubscriber || (data.user && data.user.isSubscriber) || (data.chatMessage && data.chatMessage.isSubscriber));
-            const badge = isMod ? 'Mod' : (isSub ? 'Subscriber' : '');
-
-            console.log(`💬 [CHAT] ${userInfo.username}: ${comment || '(pesan emote)'}`);
-            broadcast({
-                event: 'chat',
-                username: userInfo.username,
-                comment: comment || '(pesan emote)',
-                badge: badge
-            });
+        res.json({
+            success: true,
+            audioUrl
         });
 
-        tiktokLive.on('gift', data => {
-            const userInfo = extractUserInfo(data);
-            const giftInfo = extractGiftInfo(data);
-            console.log(`🎁 [GIFT] ${userInfo.username} kirim ${giftInfo.giftName} x${giftInfo.count}`);
-            broadcast({
-                event: 'gift',
-                username: userInfo.username,
-                giftName: giftInfo.giftName,
-                giftCount: giftInfo.count,
-                diamondCount: giftInfo.diamondCount
-            });
+    } catch (err) {
+
+        console.error('TTS ROUTE ERROR:', err);
+
+        res.status(500).json({
+            success: false,
+            error: String(err)
         });
 
-        tiktokLive.on('like', data => {
-            const userInfo = extractUserInfo(data);
-            const count = (data && (data.likeCount || data.count || (data.data && data.data.likeCount))) || 1;
-            broadcast({ event: 'like', username: userInfo.username, likeCount: count });
-        });
-
-        tiktokLive.on('member', data => {
-            const userInfo = extractUserInfo(data);
-            console.log(`👋 [JOIN] ${userInfo.username} bergabung ke Live`);
-            broadcast({ event: 'join', username: userInfo.username });
-        });
-
-        tiktokLive.on('streamEnd', () => {
-            isLiveActive = false;
-            console.log(`[STREAM END] Live berakhir untuk @${currentTikTokUser}. Kembali ke mode Standby...`);
-            broadcast({ event: 'status', comment: 'Siaran Live telah berakhir. Masuk mode Standby...' });
-            scheduleReconnect();
-        });
-
-        tiktokLive.on('error', err => {
-            const msg = (err && (err.message || err.toString())) || '';
-            if (msg.includes('403') || msg.includes('Failed to sign request')) {
-                console.log('⚠️ [TIKTOK NOTICE] Rate limit signature 403. Mengambil jeda sebelum mencoba lagi.');
-            } else {
-                console.error(`⚠️ [TIKTOK NOTICE] ${msg}`);
-            }
-        });
-
-        tiktokLive.connect()
-            .then(state => {
-                isLiveActive = true;
-                const roomId = (state && state.roomId) ? state.roomId : 'Aktif';
-                console.log(`=======================================================`);
-                console.log(`🟢 [LIVE AKTIF] SUKSES TERHUBUNG KE TIKTOK LIVE!`);
-                console.log(`   Akun Target : @${currentTikTokUser}`);
-                console.log(`   Room ID     : ${roomId}`);
-                console.log(`   Komentar & gift penonton langsung dikirim ke HP!`);
-                console.log(`=======================================================`);
-                broadcast({
-                    event: 'status',
-                    comment: `🟢 LIVE TERHUBUNG! Room ID: ${roomId}`
-                });
-            })
-            .catch(err => {
-                isLiveActive = false;
-                const errMsg = (err && (err.message || err.toString())) || '';
-                const isOffline = err && (err.name === 'UserOfflineError' || errMsg.includes('ended') || errMsg.includes('offline') || errMsg.includes('not live'));
-
-                if (isOffline) {
-                    console.log(`🟡 [STANDBY] @${currentTikTokUser} belum live. Menunggu siaran dimulai...`);
-                    broadcast({
-                        event: 'status',
-                        comment: `STANDBY: Menunggu @${currentTikTokUser} mulai Live di TikTok...`
-                    });
-                    scheduleReconnect(10000);
-                } else if (errMsg.includes('403') || errMsg.includes('Failed to sign request')) {
-                    console.log(`⚠️ [TIKTOK 403] Rate limit signature. Menunggu 15 detik...`);
-                    broadcast({
-                        event: 'status',
-                        comment: `PROTEKSI TIKTOK (403): Menunggu jeda antrean koneksi...`
-                    });
-                    scheduleReconnect(15000);
-                } else {
-                    console.error(`❌ [ERROR TIKTOK] ${errMsg}`);
-                    scheduleReconnect(12000);
-                }
-            });
-
-    } catch (e) {
-        console.error(`❌ Terjadi kesalahan saat inisialisasi: ${e.message}`);
-        scheduleReconnect(15000);
     }
-}
 
-function scheduleReconnect(delayMs = 10000) {
-    if (standbyTimer) clearTimeout(standbyTimer);
-    standbyTimer = setTimeout(() => {
-        if (!isLiveActive) {
-            connectTikTok(currentTikTokUser);
-        }
-    }, delayMs);
-}
-
-// 4. Jalankan Server
-server.listen(PORT, '0.0.0.0', () => {
-    console.log('==============================================================');
-    console.log(`🚀 TIKTOK LIVE RELAY SERVER AKTIF DI PORT ${PORT}!`);
-    console.log('==============================================================');
-    console.log(`Target Awal Akun TikTok : @${currentTikTokUser}`);
-    console.log(`Local Wi-Fi IP          : ${localIp}`);
-    console.log('==============================================================');
-
-    connectTikTok(currentTikTokUser);
 });
+
+
+// ===== Supabase REST helper (reusable for all tables) =====
+async function supabaseRest(method, table, query = '', body = null, headers = {}) {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return { ok: false, error: 'No Supabase config' };
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? '?' + query : ''}`;
+  const opts = {
+    method,
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const err = await res.text();
+      return { ok: false, error: err, status: res.status };
+    }
+    const text = await res.text();
+    return { ok: true, data: text ? JSON.parse(text) : null };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// ======================================================
+// SINKRONISASI DATA HOST DARI FIREBASE KE MEMORY SERVER
+// ======================================================
+
+
+
+// Menggunakan Listener Real-time Firestore (Hanya dipanggil SEKALI di awal server start)
+
+
+// ======================================================
+// SINKRONISASI DATA HOST DARI FIREBASE KE MEMORY SERVER
+// ======================================================
+
+const HOST_PINS = {};
+let cachedHostsArray = [];
+let firstSyncDone = false;
+
+// Listener Firestore dengan auto reconnect
+function startHostListener() {
+  console.log("🔥 Starting Firestore listener...");
+
+
+
+db.collection("hosts").onSnapshot(
+  (snapshot) => {
+
+    Object.keys(HOST_PINS).forEach(key => delete HOST_PINS[key]);
+    cachedHostsArray = [];
+
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      cachedHostsArray.push(data);
+
+      if (data.pin) {
+      HOST_PINS[data.pin] = {
+      name: data.name,
+      username: data.username,
+      expireDate: data.expireDate || null,
+      status: data.status || 'active',
+
+      permissions: data.permissions || {}
+        };
+      }
+    });
+
+    console.log(`🔥 [SYNC] Hosts loaded: ${cachedHostsArray.length}`);
+
+    if (!firstSyncDone) {
+      firstSyncDone = true;
+
+      console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
+
+      printBanner();
+    }
+  },
+
+    (error) => {
+      console.error("❌ Firestore Listener Error:", error);
+
+      // Auto reconnect
+      setTimeout(() => {
+        console.log("🔄 Reconnecting Firestore listener...");
+        startHostListener();
+      }, 5000);
+    }
+  );
+}
+
+// Ambil data dari RAM
+async function loadHosts() {
+  return cachedHostsArray;
+}
+
+// Jalankan listener SEKALI saat server start
+startHostListener();
+
+console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
+
+
+
+// ==========================================
+// API ENDPOINT: LOGIN & AMBIL DATA FIRESTORE
+// ==========================================
+app.post('/api/login', async (req, res) => {
+  const { pin } = req.body;
+
+  if (!pin) {
+    return res.status(400).json({ success: false, message: 'PIN is required' });
+  }
+
+  try {
+    console.log(`[LOGIN PROCESS] Memeriksa PIN: ${pin} ke Firestore...`);
+    
+    // 1. Ambil dokumen dari Firestore secara real-time berdasarkan PIN (ID Dokumen)
+    const hostDoc = await db.collection("hosts").doc(pin).get();
+
+    // 2. Jika dokumen PIN tidak ditemukan di Firestore
+    if (!hostDoc.exists) {
+      console.log(`❌ PIN ${pin} tidak terdaftar di Firestore.`);
+      return res.status(401).json({ success: false, message: 'Invalid PIN' });
+    }
+
+    const host = hostDoc.data();
+    console.log("🟢 DATA FIRESTORE BERHASIL DIRESOLVE:", host);
+
+    // 3. Periksa status keaktifan host
+    if (host.status === 'inactive') {
+      return res.status(403).json({ success: false, message: 'Your access has been disabled by admin' });
+    }
+
+    // 4. Sinkronkan ke objek HOST_PINS lokal memori server jika digunakan oleh socket.io
+    if (typeof HOST_PINS !== 'undefined') {
+      HOST_PINS[pin] = host;
+    }
+
+    // 5. Kirim data lengkap ke browser frontend
+    return res.json({
+    success: true,
+    room: host.username || '',
+    hostName: host.name || 'Host',
+    status: host.status || 'active',
+    expireDate: host.expireDate || null,
+
+    permissions:
+    host.permissions || {}
+      });
+
+  } catch (err) {
+    console.error("💥 Error database saat login:", err);
+    return res.status(500).json({ success: false, message: 'Internal Server Error' });
+  }
+});
+
+
+// ======================================================
+// 3. ENDPOINT LIST DATA UNTUK ADMIN PANEL (DENGAN PROTEKSI)
+// ======================================================
+app.get('/api/admin-hosts/list', async (req, res) => {
+  // Proteksi: Jika bukan admin/belum login, tolak request data
+  if (!req.session || !req.session.hostUser) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  
+  const hosts = await loadHosts();
+  res.json(hosts);
+});
+
+
+
+// ======================================================
+// 🛡️ ENDPOINT 1: LOGIN ADMIN PANEL (Username + PIN)
+// ======================================================
+app.post('/api/admin-hosts/login', async (req, res) => {
+  const { username, pin } = req.body;
+
+  if (!username || !pin) {
+    return res.status(400).json({ success: false, message: 'Missing data' });
+  }
+
+  // Reload data dari Firebase untuk memastikan data paling update saat login
+  await loadHosts();
+
+  // Cari di memory apakah ada host yang punya username dan pin yang cocok
+  const hostMatch = HOST_PINS[pin];
+
+  if (hostMatch && hostMatch.username === username) {
+    // Simpan data login ke session express
+    req.session.hostUser = {
+      username: hostMatch.username,
+      name: hostMatch.name
+    };
+    return res.json({ success: true, message: 'Admin Login Success' });
+  } else {
+    return res.status(401).json({ success: false, message: 'Invalid Username or PIN' });
+  }
+});
+
+
+
+
+
+
+// Tambahkan await loadHosts() di akhir setiap fungsi agar memory ter-update seketika
+async function addHost(data) {
+  await db.collection("hosts").doc(data.pin).set(data);
+  await loadHosts(); // 🔥 Sinkronisasi otomatis ke RAM server
+}
+
+async function updateHost(pin, data) {
+  await db.collection("hosts").doc(pin).update(data);
+  await loadHosts(); // 🔥 Sinkronisasi otomatis ke RAM server
+}
+
+async function deleteHost(pin) {
+  await db.collection("hosts").doc(pin).delete();
+  await loadHosts(); // 🔥 Sinkronisasi otomatis ke RAM server
+}
+
+async function toggleHost(pin) {
+  const doc = await db.collection("hosts").doc(pin).get();
+  if (!doc.exists) return;
+  const data = doc.data();
+  await db.collection("hosts").doc(pin).update({
+    status: data.status === "active" ? "inactive" : "active"
+  });
+  await loadHosts(); // 🔥 Sinkronisasi otomatis ke RAM server
+}
+
+
+// ======================================================
+// 🔥 FUNGSI EXTEND HOST (UPDATED & SECURED)
+// ======================================================
+async function extendHost(pin, days = 30) {
+  try {
+    const doc = await db.collection("hosts").doc(pin).get();
+    if (!doc.exists) {
+      console.log(`❌ Gagal extend: Host dengan PIN ${pin} tidak ditemukan.`);
+      return;
+    }
+
+    const data = doc.data();
+    let currentExpire;
+
+    // Antisipasi jika expireDate kosong, corrupt, atau salah format
+    if (data.expireDate && !isNaN(Date.parse(data.expireDate))) {
+      currentExpire = new Date(data.expireDate);
+    } else {
+      currentExpire = new Date(); // Jika kosong/invalid, mulai perpanjang dari hari ini
+    }
+
+    // Tambahkan jumlah hari (default 30 hari)
+    currentExpire.setDate(currentExpire.getDate() + days);
+    const newExpireDateStr = currentExpire.toISOString().split("T")[0]; // Format: YYYY-MM-DD
+
+    // 1. Update ke Database Firebase Firestore
+    await db.collection("hosts").doc(pin).update({
+      expireDate: newExpireDateStr
+    });
+
+    // 2. SINKRONISASI INSTAN: Langsung update memory RAM server tanpa restart
+    await loadHosts();
+
+    console.log(`✅ Sukses memperpanjang Host PIN: ${pin} sebanyak +${days} hari. Expire baru: ${newExpireDateStr}`);
+  } catch (error) {
+    console.error(`❌ Error saat menjalankan extendHost untuk PIN ${pin}:`, error);
+  }
+}
+
+
+
+
+
+// ===== Multi-Host: Parse HOST_PINS =====
+
+const ACCESS_PIN = process.env.ACCESS_PIN || '';
+
+if (ACCESS_PIN) {
+  console.log(`🔐 Access PIN gate enabled`);
+}
+
+// ===== StreamSession Class =====
+class StreamSession {
+  constructor(username, pin, hostName) {
+    this.username = username;      // TikTok username = room ID
+    this.pin = pin;                // Host's auth PIN
+    this.hostName = hostName;      // Display name
+    this.viewers = new Map();      // Isolated viewer tracking
+    this.connection = null;        // TikTok live connection
+    this.connectionState = { connected: false, roomId: null, error: null };
+    this.cost = { openaiTokens: 0, elevenlabsChars: 0, voiceCalls: 0 };
+    this.createdAt = Date.now();
+    this.demoActive = false;
+    this.demoInterval = null;
+    this.demoJoinTimer = null;
+    this.demoStopped = false;
+    this.demoViewerIdx = 0;
+    this.demoViewerCount = 0;
+    this.botsActive = false;
+    this.botInterval = null;
+    this.botActionInterval = null;
+    this.botJoinTimer = null;
+    this.botJoinIdx = 0;
+  }
+
+  toJSON() {
+    return {
+      room: this.username,
+      hostName: this.hostName,
+      viewerCount: this.viewers.size,
+      connected: this.connectionState.connected,
+      roomId: this.connectionState.roomId,
+      cost: this.cost,
+      costEstimate: this.getCostEstimate(),
+      createdAt: this.createdAt,
+      demoActive: this.demoActive,
+      botsActive: this.botsActive,
+    };
+  }
+
+  getCostEstimate() {
+    const openaiCost = (this.cost.openaiTokens / 1_000_000) * 0.375;
+    const elevenlabsCost = (this.cost.elevenlabsChars / 1000) * 0.30;
+    return {
+      openai: `$${openaiCost.toFixed(4)}`,
+      elevenlabs: `$${elevenlabsCost.toFixed(4)}`,
+      total: `$${(openaiCost + elevenlabsCost).toFixed(4)}`,
+    };
+  }
+}
+
+const sessions = new Map();
+
+function getSession(room) {
+  if (!room) room = '__default__';
+  return sessions.get(room) || null;
+}
+
+
+function isHostExpired(host) {
+  if (!host?.expireDate) return false;
+  const today = new Date();
+  const expireDate = new Date(host.expireDate + 'T23:59:59');
+  return today > expireDate;
+}
+
+
+function getHostByRoom(room) {
+  return Object.values(HOST_PINS).find(h => h.username === room);
+}
+
+function validateRoom(room) {
+  const host = getHostByRoom(room);
+  if (!host) return false;
+  if (host.status !== 'active') return false;
+  if (isHostExpired(host)) return false;
+  return true;
+}
+
+function isHostActive(host) {
+  return host && host.status === 'active';
+}
+
+// Neo's personality
+let NEO_PERSONALITY_PROMPT = `You ARE Neo Todak (Ahmad Fadli). You're the CEO of Todak Studios and VP of Todak Gaming, streaming live on TikTok. You speak casual Manglish — mix Malay and English naturally. You're from Cyberjaya. You love AI, gaming, and tech. Keep responses SHORT — 10 to 25 words max. Sound like a real person talking, NOT reading a script. No emojis. Write exactly how it should be SPOKEN out loud.`;
+
+async function loadNeoPersonality() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    console.log('⚠️ No Supabase config — using default Neo personality');
+    return;
+  }
+  try {
+    const headers = { 'apikey': SUPABASE_ANON_KEY, 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` };
+    const personalityRes = await fetch(`${SUPABASE_URL}/rest/v1/neo_personality?select=trait,dimension,value`, { headers });
+    const personality = personalityRes.ok ? await personalityRes.json() : [];
+    const factsRes = await fetch(`${SUPABASE_URL}/rest/v1/neo_facts?select=fact,domain&domain=in.(personal,social,gaming,philosophy)&limit=30`, { headers });
+    const facts = factsRes.ok ? await factsRes.json() : [];
+
+    if (personality.length === 0 && facts.length === 0) return;
+
+    const traits = personality.map(p => `${p.trait} (${p.dimension}): ${(p.value * 100).toFixed(0)}%`).join('. ');
+    const factsList = facts.map(f => f.fact).join('. ');
+
+    NEO_PERSONALITY_PROMPT = `You ARE Neo Todak (Ahmad Fadli), live on TikTok right now. REAL personality: TRAITS: ${traits}. KEY FACTS: ${factsList}. RULES: Casual Manglish, SHORT (10-25 words), real person talk, no emojis, exactly as spoken.`;
+    console.log(`🧠 Neo Digital Twin loaded: ${personality.length} traits, ${facts.length} facts`);
+  } catch (err) {
+    console.error('⚠️ Failed to load Digital Twin:', err.message);
+  }
+}
+
+const NURIN_MYSTIC_PROMPT = `Kamu adalah Eyang, peramal tua bijaksana dan misterius di TikTok Live. Kamu membaca nasib lewat bola kristal dan kartu tarot. SELALU sebut NAMA VIEWER. Bahasa Indonesia hangat, tenang, dalam. Jangan pakai emoji. Tulis persis seperti yang harus DIUCAPKAN.`;
+
+function buildCommentaryPrompt(eventType, eventData, recentContext, liveContext, viewerProfile, conversationLog) {
+  let contextStr = '';
+  if (liveContext || conversationLog) {
+    const sections = [];
+    if (liveContext) {
+      const topStr = liveContext.topGifters?.length ? ` Top: ${liveContext.topGifters.join(', ')}` : '';
+      sections.push(`[LIVE] ${liveContext.uptimeMinutes || 0}m. ${liveContext.viewerCount || 0}v. ${liveContext.totalReadings || 0}r.${topStr}`);
+    }
+    if (viewerProfile) {
+      sections.push(`[VIEWER ${viewerProfile.name}] ${viewerProfile.isReturning ? 'RETURNING' : 'NEW'} readings: ${viewerProfile.readingsCount}, gifts: ${viewerProfile.totalGifted}💎, zodiac: ${viewerProfile.zodiac}`);
+    }
+    if (conversationLog?.length) {
+      sections.push(`[PERCAKAPAN]\n${conversationLog.join('\n')}`);
+    }
+    contextStr = sections.join('\n\n');
+  } else if (recentContext?.length) {
+    contextStr = `Recent context: ${recentContext.join('; ')}`;
+  }
+  switch (eventType) {
+    case 'gift': return `${contextStr}\n${eventData.nickname} sent ${eventData.repeatCount}x ${eventData.giftName} (${eventData.diamondCount} diamonds). Thank them casually.`;
+    case 'chat': return `${contextStr}\n${eventData.nickname} said: "${eventData.comment}". Respond naturally.`;
+    default: return `${contextStr}\nSomething happened on stream (${eventType}). Give a casual comment.`;
+  }
+}
+
+// =====================================================
+// Serve static files
+// =====================================================
+
+app.use(express.json());
+
+// =======================================
+// Block direct HTML access
+// =======================================
+
+// =======================================
+// Middleware: Validasi Akses Room (Multi-Host)
+// =======================================
+app.use((req, res, next) => {
+  // Abaikan API internal
+  if (req.path.startsWith('/api') || req.path.startsWith('/admin-hosts')) return next();
+
+  // Daftar file yang memerlukan proteksi room
+  const protectedFiles = [
+    '/overlay.html', '/game.html', '/buble2.html', '/konsermusik.html', '/wingsofdevil.html',
+    '/phainonbattle.html', '/footballbattle.html', '/fishbattle.html', '/fishstrike.html',
+    '/gearwars.html', '/printer.html', '/stickmanbattle.html', '/royalebattle.html',
+    '/towerclimber.html', '/gokusurvival.html', '/battle2d.html', '/spiderhero.html',
+    '/fishing.html', '/swimming.html', '/mbgwar.html'
+  ];
+
+  if (!protectedFiles.includes(req.path)) return next();
+
+  // Ambil parameter room dari URL
+  const room = req.query.room;
+  if (!room) {
+    console.log(`[AUTH] Blocked access to ${req.path} - Missing room parameter`);
+    return res.status(403).send('<h1>Parameter ?room=[username] diperlukan</h1>');
+  }
+
+  // Validasi keaktifan host berdasarkan room (username)
+  if (!validateRoom(room)) {
+    console.log(`[AUTH] Blocked access to ${req.path} for room ${room} - Invalid or Expired`);
+    return res.status(403).send('<h1>⛔ Akses Ditolak</h1><p>Masa Aktif Host tidak ditemukan atau sudah habis.</p>');
+  }
+
+  next();
+});
+
+
+app.get('/api/admin-hosts/logout', (req, res) => {
+  req.session.destroy();
+  res.json({ success: true });
+});
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Range");
+  res.header("Access-Control-Expose-Headers", "Content-Length, Content-Range");
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res) => res.set('Cache-Control', 'no-store')
+}));
+
+function protectedGame(pageFile, gameKey) {
+  return (req, res) => {
+    const room = req.query.room;
+    if (!room) return res.status(403).send('Room Required');
+    const host = getHostByRoom(room);
+    if (!host || !validateRoom(room)) return res.status(403).send('Access Denied');
+    res.sendFile(path.join(__dirname, 'public', pageFile));
+  };
+}
+
+// Routes
+app.get('/buble2', protectedGame('buble2.html', 'buble2'));
+app.get('/konsermusik', protectedGame('konsermusik.html', 'konsermusik'));
+app.get('/wingsofdevil', protectedGame('wingsofdevil.html', 'wingsofdevil'));
+app.get('/phainonbattle', protectedGame('phainonbattle.html', 'phainonbattle'));
+app.get('/gearwars', protectedGame('gearwars.html', 'gearwars'));
+app.get('/printer', protectedGame('printer.html', 'printer'));
+app.get('/mbgwar', protectedGame('mbgwar.html', 'mbgwar'));
+app.get('/footballbattle', protectedGame('footballbattle.html', 'footballbattle'));
+app.get('/fishbattle', protectedGame('fishbattle.html', 'fishbattle'));
+app.get('/fishstrike', protectedGame('fishstrike.html', 'fishstrike'));
+app.get('/stickmanbattle', protectedGame('stickmanbattle.html', 'stickmanbattle'));
+app.get('/royalebattle', protectedGame('royalebattle.html', 'royalebattle'));
+app.get('/towerclimber', protectedGame('towerclimber.html', 'towerclimber'));
+app.get('/gokusurvival', protectedGame('gokusurvival.html', 'gokusurvival'));
+app.get('/battle2d', protectedGame('battle2d.html', 'battle2d'));
+app.get('/fishing', protectedGame('fishing.html', 'fishing'));
+app.get('/spiderhero', protectedGame('spiderhero.html', 'spiderhero'));
+app.get('/swimming', protectedGame('swimming.html', 'swimming'));
+app.get('/overlay', protectedGame('overlay.html', 'overlay'));
+app.get('/game', protectedGame('game.html', 'game'));
+
+const isAdmin = (req, res, next) => {
+  if (req.session && req.session.hostUser) next();
+  else res.status(401).json({ success: false, message: "Unauthorized" });
+};
+
+app.get('/api/admin-hosts/list', isAdmin, async (req, res) => {
+  const hosts = await loadHosts();
+  res.json(hosts);
+});
+
+app.post('/admin-hosts/add', isAdmin, async (req, res) => {
+  try {
+    const { pin, name, username, expireDate, permissions } = req.body;
+    await addHost({ pin, name, username, expireDate, status: 'active', permissions: permissions || {} });
+    res.json({ success: true, message: "Host berhasil ditambahkan" });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.post('/admin-hosts/update', isAdmin, async (req, res) => {
+  try {
+    const { pin, name, username, expireDate, permissions } = req.body;
+    await updateHost(pin, { name, username, expireDate, permissions: permissions || {} });
+    res.json({ success: true, message: "Host berhasil diperbarui" });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+});
+
+app.post('/admin-hosts/toggle', isAdmin, async (req, res) => {
+  try { await toggleHost(req.body.pin); res.json({ success: true }); } catch (err) { res.status(500).json({ success: false }); }
+});
+
+app.post('/admin-hosts/extend', isAdmin, async (req, res) => {
+  try { await extendHost(req.body.pin, 30); res.json({ success: true }); } catch (err) { res.status(500).json({ success: false }); }
+});
+
+app.post('/admin-hosts/delete', isAdmin, async (req, res) => {
+  try { await deleteHost(req.body.pin); res.json({ success: true }); } catch (err) { res.status(500).json({ success: false }); }
+});
+
+app.get('/api/config', (req, res) => {
+  const room = req.query.room;
+  const session = getSession(room);
+  res.json({
+    username: session ? session.username : USERNAME,
+    connected: session ? session.connectionState.connected : false,
+    room: session ? session.username : '',
+  });
+});
+
+app.post('/api/host/auth', async (req, res) => {
+  try {
+    const { username, pin } = req.body;
+    if (!pin || !username) return res.status(400).json({ success: false });
+    const doc = await db.collection("hosts").doc(String(pin)).get();
+    if (!doc.exists) return res.status(401).json({ success: false });
+    const user = doc.data();
+    if (user.username !== username || user.status !== "active") return res.status(401).json({ success: false });
+    req.session.hostUser = { username: user.username, pin: String(pin) };
+    return res.json({ success: true });
+  } catch (err) { return res.status(500).json({ success: false }); }
+});
+
+app.get('/api/auth/check', (req, res) => {
+  res.json({ needsPin: cachedHostsArray.length > 0 || !!ACCESS_PIN });
+});
+
+app.get('/api/sessions', (req, res) => {
+  res.json(Array.from(sessions.values()).map(s => s.toJSON()));
+});
+
+app.get('/api/session/:room/cost', (req, res) => {
+  const session = sessions.get(req.params.room);
+  if (!session) return res.json({ room: req.params.room, cost: { voiceCalls: 0 }, estimate: { total: "0.00" } });
+  res.json({ room: session.username, cost: session.cost, estimate: session.getCostEstimate() });
+});
+
+app.get('/api/proxy-image', async (req, res) => {
+  const imageUrl = req.query.url;
+  if (!imageUrl || imageUrl === 'undefined') return res.status(400).send("Invalid URL");
+  try {
+    const response = await fetch(imageUrl);
+    const buffer = await response.buffer();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+    res.send(buffer);
+  } catch (error) { res.status(500).send("Error"); }
+});
+
+function connectToTikTok(session) {
+  if (process.env.EULER_API_KEY) SignConfig.apiKey = process.env.EULER_API_KEY;
+  const connection = new TikTokLiveConnection(session.username, { enableExtendedGiftInfo: true });
+  let connectionReadyAt = Infinity;
+
+  connection.connect().then(state => {
+    session.connectionState = { connected: true, roomId: state.roomId, error: null };
+    io.to(session.username).emit('connection-status', session.connectionState);
+    connectionReadyAt = Date.now() + 3000;
+  }).catch(err => {
+    session.connectionState = { connected: false, roomId: null, error: err.message };
+    io.to(session.username).emit('connection-status', session.connectionState);
+  });
+
+  const extractUser = (data) => {
+    const user = data.user || data;
+    return {
+      id: (user.userId || user.uniqueId || '')?.toString(),
+      uniqueId: user.uniqueId || '',
+      nickname: user.nickname || user.uniqueId || 'Unknown',
+      profilePic: user.profilePicture?.url?.[0] || user.avatarThumb?.url?.[0] || '',
+      isFollower: (user.followRole || 0) >= 1,
+    };
+  };
+
+  const emitToRoom = (event, data) => { io.to(session.username).emit(event, data); io.to('__default__').emit(event, data); };
+
+  connection.on('member', (data) => {
+    const user = extractUser(data);
+    if (Date.now() < connectionReadyAt) return;
+    emitToRoom('viewer-join', user);
+    io.to(session.username).emit('tiktok-action', { event: "join", username: user.uniqueId, detail: "joined", amount: 1 });
+  });
+
+  connection.on('chat', (data) => {
+    const user = extractUser(data);
+    if (Date.now() < connectionReadyAt) return;
+    emitToRoom('chat', { ...user, comment: data.comment });
+  });
+
+  connection.on('gift', (data) => {
+    if (data.giftType === 1 && !data.repeatEnd) return;
+    const user = extractUser(data);
+    if (Date.now() < connectionReadyAt) return;
+    const gift = { ...user, giftName: data.giftDetails?.giftName || 'Gift', diamondCount: data.giftDetails?.diamondCount || 0, repeatCount: data.repeatCount || 1 };
+    emitToRoom('gift', gift);
+    io.to(session.username).emit('tiktok-action', { event: "gift", username: user.uniqueId, detail: `sent ${gift.giftName}`, amount: gift.repeatCount });
+  });
+
+  connection.on('like', (data) => {
+    const user = extractUser(data);
+    if (Date.now() < connectionReadyAt) return;
+    emitToRoom('like', { ...user, totalLikes: data.totalLikeCount });
+    io.to(session.username).emit('tiktok-action', JSON.stringify({ event: "like", username: user.uniqueId, detail: "liked", amount: data.likeCount }));
+  });
+
+  connection.on('disconnected', () => {
+    session.connectionState = { connected: false, roomId: null, error: 'Disconnected' };
+    emitToRoom('connection-status', session.connectionState);
+  });
+
+  session.connection = connection;
+}
+
+// Socket handling
+io.on('connection', (socket) => {
+  const room = socket.handshake.query.room || '';
+  const socketRoom = room || '__default__';
+  socket.join(socketRoom);
+
+  const session = sessions.get(room) || sessions.get('__default__');
+  if (session) {
+    socket.emit('connection-status', session.connectionState);
+    socket.emit('viewer-list', Array.from(session.viewers.values()));
+  }
+
+  socket.on('register-unity', () => socket.emit('unity-status-ok', { connected: true, activeRoom: socketRoom }));
+
+  socket.on('simulasi-ke-unity', (data) => {
+    const paket = { event: data.event || "like", username: data.username || "Viewer", detail: data.detail || "liked", amount: data.amount || 1 };
+    io.to(socketRoom).emit('tiktok-action', paket);
+    io.emit('tiktok-action', paket);
+  });
+
+  socket.on('connect-tiktok', (data) => {
+    let username = typeof data === 'object' ? data.username : data;
+    let pin = typeof data === 'object' ? data.pin : '';
+    let targetRoom = (typeof data === 'object' && data.room) ? data.room : room;
+
+    let sess = sessions.get(targetRoom);
+    if (!sess) {
+      const host = HOST_PINS[pin];
+      if (!host && (ACCESS_PIN || cachedHostsArray.length > 0)) return socket.emit('tiktok-error', { message: 'Invalid PIN' });
+      sess = new StreamSession(host ? host.username : username, pin, host ? host.name : 'Host');
+      sessions.set(sess.username, sess);
+      if (!targetRoom) sessions.set('__default__', sess);
+      socket.join(sess.username);
+    }
+    if (sess.connection) try { sess.connection.disconnect(); } catch(e) {}
+    connectToTikTok(sess);
+  });
+
+  socket.on('disconnect-tiktok', async (data) => {
+    const s = sessions.get(data?.room || room);
+    if (s && s.connection) { await s.connection.disconnect(); s.connection = null; }
+  });
+
+  socket.on("trigger-print-winner", (data) => io.to(socketRoom).emit("print-winner-hardware", data));
+  socket.on("trigger-print-gift", (data) => {
+    io.to(socketRoom).emit("print-gift-hardware", data);
+    const paket = { event: "gift", username: data.uniqueId, detail: data.giftName, amount: data.repeatCount };
+    io.to(socketRoom).emit('tiktok-action', JSON.stringify(paket));
+  });
+
+  socket.on('toggle-demo', (data) => {
+    const targetRoom = data?.room || room;
+    if (!targetRoom) return;
+    
+    let sess = sessions.get(targetRoom);
+    if (!sess) {
+      // Create a temporary session if it doesn't exist
+      sess = new StreamSession(targetRoom, '', 'Demo Host');
+      sessions.set(targetRoom, sess);
+    }
+
+    if (sess.demoActive) {
+      // STOP DEMO
+      sess.demoActive = false;
+      if (sess.demoInterval) clearInterval(sess.demoInterval);
+      sess.demoInterval = null;
+      io.to(targetRoom).emit('demo-status', { active: false });
+      console.log(`[DEMO] Stopped for room: ${targetRoom}`);
+    } else {
+      // START DEMO
+      sess.demoActive = true;
+      io.to(targetRoom).emit('demo-status', { active: true });
+      console.log(`[DEMO] Started for room: ${targetRoom}`);
+
+      sess.demoInterval = setInterval(() => {
+        if (!sess.demoActive) return;
+        
+        const events = ['chat', 'gift', 'like', 'member'];
+        const type = events[Math.floor(Math.random() * events.length)];
+        const names = ['Budi', 'Siti', 'Andi', 'Agus', 'Dewi', 'Rina', 'Eko', 'Sari'];
+        const user = names[Math.floor(Math.random() * names.length)];
+        
+        let paket = { event: type, username: user, detail: "", amount: 1 };
+
+        switch(type) {
+          case 'chat':
+            const msgs = ['Halo bang!', 'Gacorrr', 'Semangat!', 'Mabar dong', 'Salken', 'Keren parah'];
+            paket.detail = msgs[Math.floor(Math.random() * msgs.length)];
+            io.to(targetRoom).emit('chat', { nickname: user, uniqueId: user.toLowerCase(), comment: paket.detail, profilePic: "" });
+            break;
+          case 'gift':
+            const gifts = [
+              { name: 'Rose', diamonds: 1 },
+              { name: 'Finger Heart', diamonds: 5 },
+              { name: 'TikTok', diamonds: 1 },
+              { name: 'Perfume', diamonds: 20 },
+              { name: 'Cap', diamonds: 99 }
+            ];
+            const g = gifts[Math.floor(Math.random() * gifts.length)];
+            paket.detail = `sent ${g.name}`;
+            paket.amount = Math.floor(Math.random() * 5) + 1;
+            io.to(targetRoom).emit('gift', { nickname: user, uniqueId: user.toLowerCase(), giftName: g.name, diamondCount: g.diamonds, repeatCount: paket.amount });
+            break;
+          case 'like':
+            paket.detail = "liked";
+            paket.amount = Math.floor(Math.random() * 50) + 10;
+            io.to(targetRoom).emit('like', { nickname: user, uniqueId: user.toLowerCase(), totalLikes: paket.amount });
+            break;
+          case 'member':
+            paket.event = "join";
+            paket.detail = "joined";
+            io.to(targetRoom).emit('viewer-join', { nickname: user, uniqueId: user.toLowerCase(), profilePic: "" });
+            break;
+        }
+
+        io.to(targetRoom).emit('tiktok-action', paket);
+      }, 3000);
+    }
+  });
+
+  socket.on('stop-demo', (data) => {
+    const targetRoom = data?.room || room;
+    const sess = sessions.get(targetRoom);
+    if (sess) {
+      sess.demoActive = false;
+      if (sess.demoInterval) clearInterval(sess.demoInterval);
+      sess.demoInterval = null;
+      io.to(targetRoom).emit('demo-status', { active: false });
+    }
+  });
+});
+
+loadNeoPersonality().then(() => {
+  server.listen(PORT, '0.0.0.0', () => console.log(`🚀 Server listening on port ${PORT}`));
+});
+
+function printBanner() {
+  console.log(`🚀 TikTok Multi-Host Server Ready on port ${PORT}`);
+}
