@@ -291,48 +291,44 @@ let cachedHostsArray = [];
 let firstSyncDone = false;
 
 // Listener Firestore dengan auto reconnect
-function startHostListener() {
+async function startHostListener() {
   console.log("🔥 Starting Firestore listener...");
+  // Tambahkan log ini untuk memastikan project ID-nya benar
+  console.log("🔥 Firestore project ID:", admin.app().options.projectId);
 
+  db.collection("hosts").onSnapshot(
+    (snapshot) => {
+      // Tambahkan log untuk melihat berapa dokumen yang ditemukan
+      console.log(`🔥 [DEBUG] Snapshot received, total documents: ${snapshot.size}`);
+      
+      Object.keys(HOST_PINS).forEach(key => delete HOST_PINS[key]);
+      cachedHostsArray = [];
 
+      snapshot.forEach(doc => {
+        const data = doc.data();
+        console.log(`🔥 [DEBUG] Found doc: ${doc.id}, data: ${JSON.stringify(data)}`);
+        cachedHostsArray.push(data);
 
-db.collection("hosts").onSnapshot(
-  (snapshot) => {
+        if (data.pin) {
+          HOST_PINS[data.pin] = {
+            name: data.name,
+            username: data.username,
+            expireDate: data.expireDate || null,
+            status: data.status || 'active',
+            permissions: data.permissions || {}
+          };
+        }
+      });
 
-    Object.keys(HOST_PINS).forEach(key => delete HOST_PINS[key]);
-    cachedHostsArray = [];
-
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      cachedHostsArray.push(data);
-
-      if (data.pin) {
-      HOST_PINS[data.pin] = {
-      name: data.name,
-      username: data.username,
-      expireDate: data.expireDate || null,
-      status: data.status || 'active',
-
-      permissions: data.permissions || {}
-        };
+      console.log(`🔥 [SYNC] Hosts loaded: ${cachedHostsArray.length}`);
+      
+      if (!firstSyncDone) {
+        firstSyncDone = true;
+        console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
       }
-    });
-
-    console.log(`🔥 [SYNC] Hosts loaded: ${cachedHostsArray.length}`);
-
-    if (!firstSyncDone) {
-      firstSyncDone = true;
-
-      console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
-
-      printBanner();
-    }
-  },
-
+    },
     (error) => {
       console.error("❌ Firestore Listener Error:", error);
-
-      // Auto reconnect
       setTimeout(() => {
         console.log("🔄 Reconnecting Firestore listener...");
         startHostListener();
