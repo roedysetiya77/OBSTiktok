@@ -296,6 +296,9 @@ async function startHostListener() {
   // Tambahkan log ini untuk memastikan project ID-nya benar
   console.log("🔥 Firestore project ID:", admin.app().options.projectId);
 
+  console.log("🔥 [DEBUG] Mengakses Project ID:", admin.app().options.projectId);
+console.log("🔥 [DEBUG] Mengakses Collection: hosts");
+
   db.collection("hosts").onSnapshot(
     (snapshot) => {
       // Tambahkan log untuk melihat berapa dokumen yang ditemukan
