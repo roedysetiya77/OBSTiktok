@@ -13,8 +13,29 @@ import fs from 'fs';
 import axios from 'axios';
 import fetch from 'node-fetch';
 import { exec } from 'child_process';
+import admin from 'firebase-admin';
 
-import { db } from "./firebase.js";
+// Initialize Firebase Admin
+if (!admin.apps.length) {
+  try {
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log("✅ Firebase Admin initialized via FIREBASE_SERVICE_ACCOUNT env var");
+    } else {
+      admin.initializeApp({
+        credential: admin.credential.applicationDefault()
+      });
+      console.log("✅ Firebase Admin initialized via Application Default Credentials");
+    }
+  } catch (e) {
+    console.warn("⚠️ Firebase Admin initialization failed:", e.message);
+  }
+}
+
+const db = admin.firestore();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
