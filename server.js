@@ -15,6 +15,7 @@ import axios from 'axios';
 import fetch from 'node-fetch';
 import { exec } from 'child_process';
 import admin from 'firebase-admin';
+import { getFirestore } from 'firebase-admin/firestore';
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -36,9 +37,7 @@ if (!admin.apps.length) {
   }
 }
 
-const db = admin.firestore({
-  databaseId: 'ai-studio-android-tiktokli-c9be166c-0106-416a-aa2b-cd8e15472c06'
-});
+const db = getFirestore(admin.app(), 'ai-studio-android-tiktokli-c9be166c-0106-416a-aa2b-cd8e15472c06');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
