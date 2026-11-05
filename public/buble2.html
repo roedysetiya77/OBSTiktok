@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Bubble Live - TikTok Overlay</title>
+<style>
+*{ margin:0; padding:0; box-sizing:border-box; }
+html{ width:100%; height:100%; }
+body{
+  overflow:hidden;
+  height:100dvh;
+  width:100vw;
+  margin:0;
+  padding:0;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  background:#000;
+  font-family:Arial,sans-serif;
+}
+.game-frame{
+  position:relative;
+  width:min(100vw, calc(100dvh * 9 / 16));
+  height:100dvh;
+  overflow:hidden;
+  background: radial-gradient(circle at top, #1b2735 0%, #090a0f 100%);
+  border-left: 1px solid rgba(255,255,255,0.08);
+  border-right: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 0 35px rgba(0,0,0,0.7);
+}
+#gameCanvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  display:block;
+  z-index: 1;
+  touch-action: none;
+  pointer-events: auto;
+}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+<div class="game-frame" id="mainGameFrame">
+  <canvas id="gameCanvas"></canvas>
+</div>
+<script>
+  const urlParams = new URLSearchParams(window.location.search);
+  const ROOM = urlParams.get('room') || '';
+  const socket = io(window.location.origin, {
+    query: { room: ROOM },
+    transports: ['websocket','polling'],
+    reconnection: true
+  });
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const gameFrame = document.getElementById('mainGameFrame');
+  let width = canvas.width = gameFrame.clientWidth;
+  let height = canvas.height = gameFrame.clientHeight;
+  window.addEventListener('resize', () => {
+    width = canvas.width = gameFrame.clientWidth;
+    height = canvas.height = gameFrame.clientHeight;
+  });
+
+  const userMap = new Map();
+  const floatingBubbles = [];
+
+  function spawnBubble(uniqueId, profilePic) {
+    if (userMap.has(uniqueId)) return;
+    const img = new Image();
+    img.src = profilePic || "https://placehold.co/100";
+    const bubble = {
+      id: uniqueId,
+      img,
+      x: Math.random() * (width - 80) + 40,
+      y: Math.random() * (height - 80) + 40,
+      radius: 38,
+      vx: (Math.random() - 0.5) * 2,
+      vy: (Math.random() - 0.5) * 2,
+      likes: 0,
+      isMain: true
+    };
+    userMap.set(uniqueId, bubble);
+  }
+
+  socket.on('viewer-join', (data) => {
+    if (data && data.uniqueId) spawnBubble(data.uniqueId, data.profilePic);
+  });
+  socket.on('like', (data) => {
+    if (data && data.uniqueId) {
+      spawnBubble(data.uniqueId, data.profilePic);
+      const p = userMap.get(data.uniqueId);
+      if (p) p.likes += data.likeCount || 1;
+    }
+  });
+
+  function drawFrame() {
+    ctx.clearRect(0, 0, width, height);
+    userMap.forEach(b => {
+      b.x += b.vx; b.y += b.vy;
+      if (b.x < b.radius || b.x > width - b.radius) b.vx *= -1;
+      if (b.y < b.radius || b.y > height - b.radius) b.vy *= -1;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+      ctx.clip();
+      if (b.img.complete && b.img.naturalWidth > 0) {
+        ctx.drawImage(b.img, b.x - b.radius, b.y - b.radius, b.radius * 2, b.radius * 2);
+      } else {
+        ctx.fillStyle = '#00d2ff';
+        ctx.fill();
+      }
+      ctx.restore();
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 12px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(b.id, b.x, b.y + b.radius + 15);
+      ctx.fillText("❤ " + b.likes, b.x, b.y + b.radius + 30);
+    });
+    requestAnimationFrame(drawFrame);
+  }
+  drawFrame();
+</script>
+</body>
+</html>
