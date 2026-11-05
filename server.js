@@ -4,7 +4,8 @@ import express from 'express';
 import session from 'express-session';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import { TikTokLiveConnection, SignConfig } from 'tiktok-live-connector';
+import pkg from 'tiktok-live-connector';
+const { TikTokLiveConnection, SignConfig } = pkg;
 import { fileURLToPath } from 'url';
 
 import path from 'path';
