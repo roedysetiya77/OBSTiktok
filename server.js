@@ -603,8 +603,22 @@ function getHostByRoom(room) {
   return Object.values(HOST_PINS).find(h => h.username === room);
 }
 
+// Cari fungsi validateRoom di server.js dan ubah menjadi seperti ini:
+
 function validateRoom(room) {
+  // Tambahkan log ini:
+  console.log(`[DEBUG] Validasi room: ${room}`);
+  console.log(`[DEBUG] Daftar Host di memori: ${JSON.stringify(Object.keys(HOST_PINS))}`);
+  
   const host = getHostByRoom(room);
+  
+  // Tambahkan log ini:
+  if (!host) {
+      console.log(`[DEBUG] Host TIDAK DITEMUKAN untuk username: ${room}`);
+  } else {
+      console.log(`[DEBUG] Host DITEMUKAN: ${JSON.stringify(host)}`);
+  }
+
   if (!host) return false;
   if (host.status !== 'active') return false;
   if (isHostExpired(host)) return false;
