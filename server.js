@@ -733,23 +733,21 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.static(path.join(__dirname, 'public'), {
-  etag: false,
-  lastModified: false,
-  setHeaders: (res) => res.set('Cache-Control', 'no-store')
-}));
-
+// Routes
 function protectedGame(pageFile, gameKey) {
   return (req, res) => {
     const room = req.query.room;
+    console.log(`[DEBUG] protectedGame called for ${pageFile}, room: ${room}`);
     if (!room) return res.status(403).send('Room Required');
     const host = getHostByRoom(room);
+    console.log(`[DEBUG] host found: ${!!host}, validateRoom: ${validateRoom(room)}`);
     if (!host || !validateRoom(room)) return res.status(403).send('Access Denied');
-    res.sendFile(path.join(__dirname, 'public', pageFile));
+    const fullPath = path.join(__dirname, 'public', pageFile);
+    console.log(`[DEBUG] Serving file: ${fullPath}`);
+    res.sendFile(fullPath);
   };
 }
 
-// Routes
 app.get('/buble2', protectedGame('buble2.html', 'buble2'));
 app.get('/konsermusik', protectedGame('konsermusik.html', 'konsermusik'));
 app.get('/wingsofdevil', protectedGame('wingsofdevil.html', 'wingsofdevil'));
@@ -770,6 +768,12 @@ app.get('/spiderhero', protectedGame('spiderhero.html', 'spiderhero'));
 app.get('/swimming', protectedGame('swimming.html', 'swimming'));
 app.get('/overlay', protectedGame('overlay.html', 'overlay'));
 app.get('/game', protectedGame('game.html', 'game'));
+
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders: (res) => res.set('Cache-Control', 'no-store')
+}));
 
 const isAdmin = (req, res, next) => {
   if (req.session && req.session.hostUser) next();
