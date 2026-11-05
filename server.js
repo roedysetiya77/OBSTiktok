@@ -866,9 +866,19 @@ app.get('/api/proxy-image', async (req, res) => {
 });
 
 function connectToTikTok(session) {
-  if (process.env.EULER_API_KEY && SignConfig) SignConfig.apiKey = process.env.EULER_API_KEY;
+  const apiKey = process.env.EULER_API_KEY || process.env.TALL_API_KEY || '';
+  if (apiKey) {
+    if (SignConfig) SignConfig.apiKey = apiKey;
+    if (pkg.SignConfig) pkg.SignConfig.apiKey = apiKey;
+  }
   const ConnectionClass = TikTokLiveConnection || pkg.WebcastPushConnection || pkg.default || pkg;
-  const connection = new ConnectionClass(session.username, { enableExtendedGiftInfo: true });
+  const options = {
+    enableExtendedGiftInfo: true
+  };
+  if (apiKey) {
+    options.signApiKey = apiKey;
+  }
+  const connection = new ConnectionClass(session.username, options);
   let connectionReadyAt = Infinity;
 
   connection.connect().then(state => {
