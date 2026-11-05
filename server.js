@@ -6,7 +6,8 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { WebSocketServer } from 'ws';
 import pkg from 'tiktok-live-connector';
-const { TikTokLiveConnection, SignConfig } = pkg;
+const TikTokLiveConnection = pkg.TikTokLiveConnection || pkg.WebcastPushConnection || pkg.default?.WebcastPushConnection || pkg.default || pkg;
+const SignConfig = pkg.SignConfig || pkg.default?.SignConfig || {};
 import { fileURLToPath } from 'url';
 
 import path from 'path';
@@ -865,8 +866,9 @@ app.get('/api/proxy-image', async (req, res) => {
 });
 
 function connectToTikTok(session) {
-  if (process.env.EULER_API_KEY) SignConfig.apiKey = process.env.EULER_API_KEY;
-  const connection = new TikTokLiveConnection(session.username, { enableExtendedGiftInfo: true });
+  if (process.env.EULER_API_KEY && SignConfig) SignConfig.apiKey = process.env.EULER_API_KEY;
+  const ConnectionClass = TikTokLiveConnection || pkg.WebcastPushConnection || pkg.default || pkg;
+  const connection = new ConnectionClass(session.username, { enableExtendedGiftInfo: true });
   let connectionReadyAt = Infinity;
 
   connection.connect().then(state => {
