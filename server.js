@@ -876,8 +876,39 @@ function connectToTikTok(session) {
     io.to(session.username).emit('connection-status', session.connectionState);
     connectionReadyAt = Date.now() + 3000;
   }).catch(err => {
+    console.warn(`⚠️ TikTok Live connection failed for ${session.username}: ${err.message}. Starting Demo/Simulation Mode as fallback.`);
     session.connectionState = { connected: false, roomId: null, error: err.message };
     io.to(session.username).emit('connection-status', session.connectionState);
+    
+    // Auto-start demo simulation fallback so mini-game and app show live activity instantly
+    if (!session.demoActive) {
+      session.demoActive = true;
+      if (session.demoInterval) clearInterval(session.demoInterval);
+      session.demoInterval = setInterval(() => {
+        if (!session.demoActive) return;
+        const events = ['chat', 'gift', 'like', 'member'];
+        const type = events[Math.floor(Math.random() * events.length)];
+        const names = ['Andi', 'Siti', 'Budi', 'Dewi', 'Rina', 'Eko', 'Sari', 'Joko'];
+        const user = names[Math.floor(Math.random() * names.length)];
+        const uniqueId = user.toLowerCase() + Math.floor(Math.random() * 100);
+        
+        if (type === 'chat') {
+          const msgs = ['Halo min!', 'Gacor bang', 'Semangat cett', 'Mabar dong', 'Mantap jiwa 🔥'];
+          const comment = msgs[Math.floor(Math.random() * msgs.length)];
+          emitToRoom('chat', { nickname: user, uniqueId, comment, profilePic: "https://placehold.co/100" });
+        } else if (type === 'gift') {
+          const gifts = [{ name: 'Rose', diamonds: 1 }, { name: 'Finger Heart', diamonds: 5 }, { name: 'TikTok', diamonds: 1 }];
+          const g = gifts[Math.floor(Math.random() * gifts.length)];
+          const repeatCount = Math.floor(Math.random() * 3) + 1;
+          emitToRoom('gift', { nickname: user, uniqueId, giftName: g.name, diamondCount: g.diamonds, repeatCount, profilePic: "https://placehold.co/100" });
+        } else if (type === 'like') {
+          const likeCount = Math.floor(Math.random() * 20) + 5;
+          emitToRoom('like', { nickname: user, uniqueId, likeCount, totalLikes: likeCount, profilePic: "https://placehold.co/100" });
+        } else if (type === 'member') {
+          emitToRoom('viewer-join', { nickname: user, uniqueId, profilePic: "https://placehold.co/100" });
+        }
+      }, 3500);
+    }
   });
 
   const extractUser = (data) => {
