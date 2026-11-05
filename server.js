@@ -291,53 +291,58 @@ let cachedHostsArray = [];
 let firstSyncDone = false;
 
 // Listener Firestore dengan auto reconnect
-async function startHostListener() {
+function startHostListener() {
   console.log("🔥 Starting Firestore listener...");
-  // Tambahkan log ini untuk memastikan project ID-nya benar
-  console.log("🔥 Firestore project ID:", admin.app().options.projectId);
-
-  console.log("🔥 [DEBUG] Mengakses Project ID:", admin.app().options.projectId);
-console.log("🔥 [DEBUG] Mengakses Collection: hosts");
-
-  db.collection("hosts").onSnapshot(
-    (snapshot) => {
-      // Tambahkan log untuk melihat berapa dokumen yang ditemukan
-      console.log(`🔥 [DEBUG] Snapshot received, total documents: ${snapshot.size}`);
+  console.log("🔥 [DEBUG] Firebase App name:", admin.app().name);
+  
+  try {
+      const hostsRef = db.collection("hosts");
+      console.log("🔥 [DEBUG] Listening to collection path:", hostsRef.path);
       
-      Object.keys(HOST_PINS).forEach(key => delete HOST_PINS[key]);
-      cachedHostsArray = [];
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        console.log(`🔥 [DEBUG] Found doc: ${doc.id}, data: ${JSON.stringify(data)}`);
-        cachedHostsArray.push(data);
-
-        if (data.pin) {
-          HOST_PINS[data.pin] = {
-            name: data.name,
-            username: data.username,
-            expireDate: data.expireDate || null,
-            status: data.status || 'active',
-            permissions: data.permissions || {}
-          };
+      hostsRef.onSnapshot(
+        (snapshot) => {
+          console.log(`🔥 [DEBUG] Listener active. Snapshot size: ${snapshot.size}`);
+          
+          Object.keys(HOST_PINS).forEach(key => delete HOST_PINS[key]);
+          cachedHostsArray = [];
+      
+          snapshot.forEach(doc => {
+            const data = doc.data();
+            console.log(`🔥 [DEBUG] Found doc: ${doc.id}, data keys: ${Object.keys(data)}`);
+            cachedHostsArray.push(data);
+      
+            if (data.pin) {
+              HOST_PINS[data.pin] = {
+                name: data.name,
+                username: data.username,
+                expireDate: data.expireDate || null,
+                status: data.status || 'active',
+                permissions: data.permissions || {}
+              };
+            }
+          });
+      
+          console.log(`🔥 [SYNC] Hosts loaded: ${cachedHostsArray.length}`);
+      
+          if (!firstSyncDone) {
+            firstSyncDone = true;
+            console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
+            printBanner();
+          }
+        },
+        (error) => {
+          console.error("❌ Firestore Listener Error:", error);
+      
+          // Auto reconnect
+          setTimeout(() => {
+            console.log("🔄 Reconnecting Firestore listener...");
+            startHostListener();
+          }, 5000);
         }
-      });
-
-      console.log(`🔥 [SYNC] Hosts loaded: ${cachedHostsArray.length}`);
-      
-      if (!firstSyncDone) {
-        firstSyncDone = true;
-        console.log("🔥 HOST SYSTEM READY & SYNCHRONIZED");
-      }
-    },
-    (error) => {
-      console.error("❌ Firestore Listener Error:", error);
-      setTimeout(() => {
-        console.log("🔄 Reconnecting Firestore listener...");
-        startHostListener();
-      }, 5000);
-    }
-  );
+      );
+  } catch (e) {
+      console.error("❌ Error setting up listener:", e);
+  }
 }
 
 // Ambil data dari RAM
@@ -602,22 +607,8 @@ function getHostByRoom(room) {
   return Object.values(HOST_PINS).find(h => h.username === room);
 }
 
-// Cari fungsi validateRoom di server.js dan ubah menjadi seperti ini:
-
 function validateRoom(room) {
-  // Tambahkan log ini:
-  console.log(`[DEBUG] Validasi room: ${room}`);
-  console.log(`[DEBUG] Daftar Host di memori: ${JSON.stringify(Object.keys(HOST_PINS))}`);
-  
   const host = getHostByRoom(room);
-  
-  // Tambahkan log ini:
-  if (!host) {
-      console.log(`[DEBUG] Host TIDAK DITEMUKAN untuk username: ${room}`);
-  } else {
-      console.log(`[DEBUG] Host DITEMUKAN: ${JSON.stringify(host)}`);
-  }
-
   if (!host) return false;
   if (host.status !== 'active') return false;
   if (isHostExpired(host)) return false;
