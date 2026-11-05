@@ -312,8 +312,9 @@ function startHostListener() {
             console.log(`🔥 [DEBUG] Found doc: ${doc.id}, data keys: ${Object.keys(data)}`);
             cachedHostsArray.push(data);
       
-            if (data.pin) {
-              HOST_PINS[data.pin] = {
+            const hostPin = data.pin || doc.id;
+            if (hostPin) {
+              HOST_PINS[hostPin] = {
                 name: data.name,
                 username: data.username,
                 expireDate: data.expireDate || null,
